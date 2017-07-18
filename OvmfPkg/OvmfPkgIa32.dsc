@@ -718,6 +718,7 @@
   OvmfPkg/XenIoPciDxe/XenIoPciDxe.inf
   OvmfPkg/XenBusDxe/XenBusDxe.inf
   OvmfPkg/XenPvBlkDxe/XenPvBlkDxe.inf
+  OvmfPkg/MptScsiDxe/MptScsiDxe.inf
   MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
