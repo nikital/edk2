@@ -64,6 +64,21 @@ MptScsiPassThru (
 }
 
 STATIC
+BOOLEAN
+IsTargetInitialized (
+  IN UINT8                                          *Target
+  )
+{
+  int i;
+  for (i = 0; i < TARGET_MAX_BYTES; ++i) {
+    if (Target[i] != 0xFF) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+STATIC
 EFI_STATUS
 EFIAPI
 MptScsiGetNextTargetLun (
@@ -72,7 +87,16 @@ MptScsiGetNextTargetLun (
   IN OUT UINT64                                     *Lun
   )
 {
-  return EFI_UNSUPPORTED;
+  //
+  // Currently support only target 0 LUN 0, so hardcode it
+  //
+  if (!IsTargetInitialized (*Target)) {
+    **Target = 0;
+    *Lun = 0;
+    return EFI_SUCCESS;
+  } else {
+    return EFI_NOT_FOUND;
+  }
 }
 
 STATIC
@@ -83,7 +107,15 @@ MptScsiGetNextTarget (
   IN OUT UINT8                                     **Target
   )
 {
-  return EFI_UNSUPPORTED;
+  //
+  // Currently support only target 0 LUN 0, so hardcode it
+  //
+  if (!IsTargetInitialized (*Target)) {
+    **Target = 0;
+    return EFI_SUCCESS;
+  } else {
+    return EFI_NOT_FOUND;
+  }
 }
 
 STATIC
