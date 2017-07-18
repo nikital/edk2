@@ -24,6 +24,7 @@
   OvmfPkg/OvmfPkg.dec
 
 [LibraryClasses]
+  BaseMemoryLib
   DebugLib
   MemoryAllocationLib
   UefiBootServicesTableLib
@@ -33,3 +34,6 @@
 [Protocols]
   gEfiExtScsiPassThruProtocolGuid        ## BY_START
   gEfiPciIoProtocolGuid                  ## TO_START
+
+[FixedPcd]
+  gUefiOvmfPkgTokenSpaceGuid.PcdMptScsiMaxTargetLimit   ## CONSUMES
