@@ -435,8 +435,9 @@ OvmfPkg: CSM modules
 F: OvmfPkg/Csm/
 R: David Woodhouse <dwmw2@infradead.org>
 
-OvmfPkg: PVSCSI driver
+OvmfPkg: PVSCSI and MptScsi driver
 F: OvmfPkg/PvScsiDxe/
+F: OvmfPkg/MptScsiDxe/
 R: Liran Alon <liran.alon@oracle.com>
 R: Nikita Leshenko <nikita.leshchenko@oracle.com>
 
