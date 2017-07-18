@@ -40,6 +40,7 @@ typedef struct {
   UINT32                          Signature;
   EFI_EXT_SCSI_PASS_THRU_PROTOCOL PassThru;
   EFI_EXT_SCSI_PASS_THRU_MODE     PassThruMode;
+  EFI_PCI_IO_PROTOCOL             *PciIo;
 } MPT_SCSI_DEV;
 
 #define MPT_SCSI_FROM_PASS_THRU(PassThruPtr) \
@@ -270,6 +271,18 @@ MptScsiControllerStart (
 
   Dev->Signature = MPT_SCSI_DEV_SIGNATURE;
 
+  Status = gBS->OpenProtocol (
+                  ControllerHandle,
+                  &gEfiPciIoProtocolGuid,
+                  (VOID **)&Dev->PciIo,
+                  This->DriverBindingHandle,
+                  ControllerHandle,
+                  EFI_OPEN_PROTOCOL_BY_DRIVER
+                  );
+  if (EFI_ERROR (Status)) {
+    goto Done;
+  }
+
   //
   // Host adapter channel, doesn't exist
   //
@@ -299,6 +312,15 @@ MptScsiControllerStart (
 
 Done:
   if (EFI_ERROR (Status)) {
+    if (Dev->PciIo) {
+      gBS->CloseProtocol (
+             ControllerHandle,
+             &gEfiPciIoProtocolGuid,
+             This->DriverBindingHandle,
+             ControllerHandle
+             );
+    }
+
     FreePool (Dev);
   }
 
@@ -337,6 +359,13 @@ MptScsiControllerStop (
          ControllerHandle,
          &gEfiExtScsiPassThruProtocolGuid,
          &Dev->PassThru
+         );
+
+  gBS->CloseProtocol (
+         ControllerHandle,
+         &gEfiPciIoProtocolGuid,
+         This->DriverBindingHandle,
+         ControllerHandle
          );
 
   FreePool (Dev);
