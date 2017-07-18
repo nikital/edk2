@@ -17,6 +17,7 @@
 
 #include <IndustryStandard/FusionMptScsi.h>
 #include <IndustryStandard/Pci.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
@@ -63,6 +64,22 @@ MptScsiPassThru (
 }
 
 STATIC
+BOOLEAN
+IsTargetInitialized (
+  IN UINT8                                          *Target
+  )
+{
+  UINTN Idx;
+
+  for (Idx = 0; Idx < TARGET_MAX_BYTES; ++Idx) {
+    if (Target[Idx] != 0xFF) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+STATIC
 EFI_STATUS
 EFIAPI
 MptScsiGetNextTargetLun (
@@ -71,7 +88,16 @@ MptScsiGetNextTargetLun (
   IN OUT UINT64                                     *Lun
   )
 {
-  return EFI_UNSUPPORTED;
+  //
+  // Currently support only target 0 LUN 0, so hardcode it
+  //
+  if (!IsTargetInitialized (*Target)) {
+    ZeroMem (*Target, TARGET_MAX_BYTES);
+    *Lun = 0;
+    return EFI_SUCCESS;
+  } else {
+    return EFI_NOT_FOUND;
+  }
 }
 
 STATIC
@@ -82,7 +108,15 @@ MptScsiGetNextTarget (
   IN OUT UINT8                                     **Target
   )
 {
-  return EFI_UNSUPPORTED;
+  //
+  // Currently support only target 0 LUN 0, so hardcode it
+  //
+  if (!IsTargetInitialized (*Target)) {
+    ZeroMem (*Target, TARGET_MAX_BYTES);
+    return EFI_SUCCESS;
+  } else {
+    return EFI_NOT_FOUND;
+  }
 }
 
 STATIC
