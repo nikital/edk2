@@ -273,6 +273,10 @@
   ## Microseconds to stall between polling for MptScsi request result
   gUefiOvmfPkgTokenSpaceGuid.PcdMptScsiStallPerPollUsec|5|UINT32|0x39
 
+  ## Set the *inclusive* number of targets that MptScsi exposes for scan
+  #  by ScsiBusDxe.
+  gUefiOvmfPkgTokenSpaceGuid.PcdMptScsiMaxTargetLimit|7|UINT8|0x40
+
 [PcdsDynamic, PcdsDynamicEx]
   gUefiOvmfPkgTokenSpaceGuid.PcdEmuVariableEvent|0|UINT64|2
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfFlashVariablesEnable|FALSE|BOOLEAN|0x10
