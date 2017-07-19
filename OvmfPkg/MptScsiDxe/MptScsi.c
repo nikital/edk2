@@ -41,6 +41,7 @@ typedef struct {
   EFI_EXT_SCSI_PASS_THRU_PROTOCOL PassThru;
   EFI_EXT_SCSI_PASS_THRU_MODE     PassThruMode;
   EFI_PCI_IO_PROTOCOL             *PciIo;
+  UINT64                          OriginalPciAttributes;
 } MPT_SCSI_DEV;
 
 #define MPT_SCSI_FROM_PASS_THRU(PassThruPtr) \
@@ -311,6 +312,30 @@ MptScsiControllerStart (
     goto FreePool;
   }
 
+  Status = Dev->PciIo->Attributes (
+                         Dev->PciIo,
+                         EfiPciIoAttributeOperationGet,
+                         0,
+                         &Dev->OriginalPciAttributes
+                         );
+  if (EFI_ERROR (Status)) {
+    goto CloseProtocol;
+  }
+
+  //
+  // Enable I/O Space & Bus-Mastering
+  //
+  Status = Dev->PciIo->Attributes (
+                         Dev->PciIo,
+                         EfiPciIoAttributeOperationEnable,
+                         (EFI_PCI_IO_ATTRIBUTE_IO |
+                          EFI_PCI_IO_ATTRIBUTE_BUS_MASTER),
+                         NULL
+                         );
+  if (EFI_ERROR (Status)) {
+    goto CloseProtocol;
+  }
+
   //
   // Host adapter channel, doesn't exist
   //
@@ -335,10 +360,18 @@ MptScsiControllerStart (
                   &Dev->PassThru
                   );
   if (EFI_ERROR (Status)) {
-    goto CloseProtocol;
+    goto RestoreAttributes;
   }
 
   return EFI_SUCCESS;
+
+RestoreAttributes:
+  Dev->PciIo->Attributes (
+                Dev->PciIo,
+                EfiPciIoAttributeOperationEnable,
+                Dev->OriginalPciAttributes,
+                NULL
+                );
 
 CloseProtocol:
   gBS->CloseProtocol (
@@ -388,6 +421,13 @@ MptScsiControllerStop (
                   &Dev->PassThru
                   );
   ASSERT_EFI_ERROR (Status);
+
+  Dev->PciIo->Attributes (
+                Dev->PciIo,
+                EfiPciIoAttributeOperationEnable,
+                Dev->OriginalPciAttributes,
+                NULL
+                );
 
   gBS->CloseProtocol (
          ControllerHandle,
