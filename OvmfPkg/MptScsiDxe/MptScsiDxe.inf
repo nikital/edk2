@@ -40,3 +40,6 @@
 [Protocols]
   gEfiPciIoProtocolGuid                  ## TO_START
   gEfiExtScsiPassThruProtocolGuid        ## BY_START
+
+[Pcd]
+  gUefiOvmfPkgTokenSpaceGuid.PcdMptScsiStallPerPollUsec ## CONSUMES

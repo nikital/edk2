@@ -23,6 +23,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 #include <Protocol/PciIo.h>
+#include <Protocol/PciRootBridgeIo.h>
 #include <Protocol/ScsiPassThruExt.h>
 
 //
@@ -35,6 +36,13 @@
 // Runtime Structures
 //
 
+typedef struct {
+  MPT_SCSI_IO_ERROR_REPLY         IoErrorReply;
+  MPT_SCSI_REQUEST_WITH_SG        IoRequest;
+  UINT8                           Sense[MAX_UINT8];
+  UINT8                           Data[0x2000];
+} MPT_SCSI_DMA_BUFFER;
+
 #define MPT_SCSI_DEV_SIGNATURE SIGNATURE_32 ('M','P','T','S')
 typedef struct {
   UINT32                          Signature;
@@ -42,10 +50,17 @@ typedef struct {
   EFI_EXT_SCSI_PASS_THRU_MODE     PassThruMode;
   EFI_PCI_IO_PROTOCOL             *PciIo;
   UINT64                          OriginalPciAttributes;
+  UINT32                          StallPerPollUsec;
+  MPT_SCSI_DMA_BUFFER             *Dma;
+  EFI_PHYSICAL_ADDRESS            DmaPhysical;
+  VOID                            *DmaMapping;
 } MPT_SCSI_DEV;
 
 #define MPT_SCSI_FROM_PASS_THRU(PassThruPtr) \
   CR (PassThruPtr, MPT_SCSI_DEV, PassThru, MPT_SCSI_DEV_SIGNATURE)
+
+#define MPT_SCSI_DMA_ADDR(Dev, MemberName) \
+  (Dev->DmaPhysical + OFFSET_OF(MPT_SCSI_DMA_BUFFER, MemberName))
 
 //
 // Hardware functions
@@ -147,6 +162,8 @@ MptScsiInit (
   UINT8                          *ReplyBytes;
   UINT32                         Reply32;
 
+  Dev->StallPerPollUsec = PcdGet32 (PcdMptScsiStallPerPollUsec);
+
   Status = MptScsiReset (Dev);
   if (EFI_ERROR (Status)) {
     return Status;
@@ -205,6 +222,227 @@ MptScsiInit (
     return Status;
   }
 
+  //
+  // Put one free reply frame on the reply queue, the hardware may use it to
+  // report an error to us.
+  //
+  Status = Out32 (Dev, MPT_REG_REP_Q, MPT_SCSI_DMA_ADDR (Dev, IoErrorReply));
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+MptScsiPopulateRequest (
+  IN MPT_SCSI_DEV                                   *Dev,
+  IN UINT8                                          Target,
+  IN UINT64                                         Lun,
+  IN OUT EFI_EXT_SCSI_PASS_THRU_SCSI_REQUEST_PACKET *Packet
+  )
+{
+  MPT_SCSI_REQUEST_WITH_SG *Request;
+
+  Request = &Dev->Dma->IoRequest;
+
+  if (Packet->DataDirection == EFI_EXT_SCSI_DATA_DIRECTION_BIDIRECTIONAL ||
+      Packet->CdbLength > sizeof (Request->Data.Header.CDB)) {
+    return EFI_UNSUPPORTED;
+  }
+
+  if (Target > 0 || Lun > 0) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (Packet->InTransferLength > sizeof (Dev->Dma->Data)) {
+    Packet->InTransferLength = sizeof (Dev->Dma->Data);
+    return EFI_BAD_BUFFER_SIZE;
+  }
+  if (Packet->OutTransferLength > sizeof (Dev->Dma->Data)) {
+    Packet->OutTransferLength = sizeof (Dev->Dma->Data);
+    return EFI_BAD_BUFFER_SIZE;
+  }
+
+  ZeroMem (Request, sizeof (*Request));
+  Request->Data.Header.TargetID = Target;
+  //
+  // It's 1 and not 0, for some reason...
+  //
+  Request->Data.Header.LUN[1] = Lun;
+  Request->Data.Header.Function = MPT_MESSAGE_HDR_FUNCTION_SCSI_IO_REQUEST;
+  Request->Data.Header.MessageContext = 1; // We handle one request at a time
+
+  Request->Data.Header.CDBLength = Packet->CdbLength;
+  CopyMem (Request->Data.Header.CDB, Packet->Cdb, Packet->CdbLength);
+
+  //
+  // SenseDataLength is UINT8, Sense[] is MAX_UINT8, so we can't overflow
+  //
+  ZeroMem (&Dev->Dma->Sense, Packet->SenseDataLength);
+  Request->Data.Header.SenseBufferLength = Packet->SenseDataLength;
+  Request->Data.Header.SenseBufferLowAddress = MPT_SCSI_DMA_ADDR (Dev, Sense);
+
+  Request->Data.Sg.EndOfList = 1;
+  Request->Data.Sg.EndOfBuffer = 1;
+  Request->Data.Sg.LastElement = 1;
+  Request->Data.Sg.ElementType = MPT_SG_ENTRY_TYPE_SIMPLE;
+  Request->Data.Sg.DataBufferAddress = MPT_SCSI_DMA_ADDR (Dev, Data);
+
+  Request->Data.Header.Control = MPT_SCSIIO_REQUEST_CONTROL_TXDIR_NONE;
+  switch (Packet->DataDirection)
+  {
+  case EFI_EXT_SCSI_DATA_DIRECTION_READ:
+    if (Packet->InTransferLength == 0) {
+      break;
+    }
+    Request->Data.Header.DataLength = Packet->InTransferLength;
+    Request->Data.Sg.Length = Packet->InTransferLength;
+    Request->Data.Header.Control = MPT_SCSIIO_REQUEST_CONTROL_TXDIR_READ;
+    break;
+  case EFI_EXT_SCSI_DATA_DIRECTION_WRITE:
+    if (Packet->OutTransferLength == 0) {
+      break;
+    }
+    Request->Data.Header.DataLength = Packet->OutTransferLength;
+    Request->Data.Sg.Length = Packet->OutTransferLength;
+    Request->Data.Header.Control = MPT_SCSIIO_REQUEST_CONTROL_TXDIR_WRITE;
+
+    CopyMem (Dev->Dma->Data, Packet->OutDataBuffer, Packet->OutTransferLength);
+    Request->Data.Sg.BufferContainsData = 1;
+    break;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+MptScsiSendRequest (
+  IN MPT_SCSI_DEV                                   *Dev,
+  IN OUT EFI_EXT_SCSI_PASS_THRU_SCSI_REQUEST_PACKET *Packet
+  )
+{
+  EFI_STATUS Status;
+
+  //
+  // Make sure Request is fully written
+  //
+  MemoryFence ();
+
+  Status = Out32 (Dev, MPT_REG_REQ_Q, MPT_SCSI_DMA_ADDR (Dev, IoRequest));
+  if (EFI_ERROR (Status)) {
+    //
+    // We couldn't enqueue the request, report it as an adapter error
+    //
+    Packet->InTransferLength  = 0;
+    Packet->OutTransferLength = 0;
+    Packet->HostAdapterStatus = EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OTHER;
+    Packet->TargetStatus      = EFI_EXT_SCSI_STATUS_TARGET_GOOD;
+    Packet->SenseDataLength   = 0;
+    return EFI_DEVICE_ERROR;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+MptScsiGetReply (
+  IN MPT_SCSI_DEV                                   *Dev,
+  OUT UINT32                                        *Reply
+  )
+{
+  EFI_STATUS Status;
+  UINT32     Istatus;
+  UINT32     EmptyReply;
+
+  for (;;) {
+    Status = In32 (Dev, MPT_REG_ISTATUS, &Istatus);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    //
+    // Interrupt raised
+    //
+    if (Istatus & MPT_IMASK_REPLY) {
+      break;
+    }
+
+    gBS->Stall (Dev->StallPerPollUsec);
+  }
+
+  Status = In32 (Dev, MPT_REG_REP_Q, Reply);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  //
+  // The driver is supposed to fetch replies until 0xffffffff is returned, which
+  // will reset the interrupt status. We put only one request, so we expect the
+  // next read reply to be the last.
+  //
+  Status = In32 (Dev, MPT_REG_REP_Q, &EmptyReply);
+  if (EFI_ERROR (Status) || EmptyReply != MAX_UINT32) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+MptScsiHandleReply (
+  IN MPT_SCSI_DEV                                   *Dev,
+  IN UINT32                                         Reply,
+  OUT EFI_EXT_SCSI_PASS_THRU_SCSI_REQUEST_PACKET    *Packet
+  )
+{
+  EFI_STATUS Status;
+
+  CopyMem (Packet->SenseData, Dev->Dma->Sense, Packet->SenseDataLength);
+  if (Packet->DataDirection == EFI_EXT_SCSI_DATA_DIRECTION_READ) {
+    CopyMem (Packet->InDataBuffer, Dev->Dma->Data, Packet->InTransferLength);
+  }
+
+  if (Reply == Dev->Dma->IoRequest.Data.Header.MessageContext) {
+    //
+    // Everything is good
+    //
+    Packet->HostAdapterStatus = EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OK;
+    Packet->TargetStatus = EFI_EXT_SCSI_STATUS_TARGET_GOOD;
+
+  } else if (Reply & (1 << 31)) {
+    DEBUG ((DEBUG_ERROR, "%a: request failed\n", __FUNCTION__));
+    //
+    // When reply MSB is set, it's an error frame.
+    //
+
+    switch (Dev->Dma->IoErrorReply.Data.IOCStatus) {
+    case MPT_SCSI_IO_ERROR_IOCSTATUS_DEVICE_NOT_THERE:
+      Packet->HostAdapterStatus =
+        EFI_EXT_SCSI_STATUS_HOST_ADAPTER_SELECTION_TIMEOUT;
+      break;
+    default:
+      Packet->HostAdapterStatus = EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OTHER;
+      break;
+    }
+
+    //
+    // Resubmit the reply frame to the reply queue
+    //
+    Status = Out32 (Dev, MPT_REG_REP_Q, MPT_SCSI_DMA_ADDR (Dev, IoErrorReply));
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+  } else {
+    DEBUG ((DEBUG_ERROR, "%a: unexpected reply\n", __FUNCTION__));
+    return EFI_DEVICE_ERROR;
+  }
+
   return EFI_SUCCESS;
 }
 
@@ -223,7 +461,50 @@ MptScsiPassThru (
   IN EFI_EVENT                                      Event     OPTIONAL
   )
 {
-  return EFI_UNSUPPORTED;
+  EFI_STATUS   Status;
+  MPT_SCSI_DEV *Dev;
+  UINT32       Reply;
+
+  Dev = MPT_SCSI_FROM_PASS_THRU (This);
+  Status = MptScsiPopulateRequest (Dev, *Target, Lun, Packet);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = MptScsiSendRequest (Dev, Packet);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Packet->HostAdapterStatus = EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OK;
+
+  Status = MptScsiGetReply (Dev, &Reply);
+  if (EFI_ERROR (Status)) {
+    goto Fatal;
+  }
+
+  Status = MptScsiHandleReply (Dev, Reply, Packet);
+  if (EFI_ERROR (Status)) {
+    goto Fatal;
+  }
+
+  return Status;
+
+Fatal:
+  //
+  // We erred in the middle of a transaction, a very serious problem has occured
+  // and it's not clear if it's possible to recover without leaving the hardware
+  // in an inconsistent state. Perhaps we would want to reset the device...
+  //
+  DEBUG ((DEBUG_ERROR, "%a: fatal error in scsi request\n", __FUNCTION__));
+  Packet->InTransferLength  = 0;
+  Packet->OutTransferLength = 0;
+  if (Packet->HostAdapterStatus == EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OK) {
+    Packet->HostAdapterStatus = EFI_EXT_SCSI_STATUS_HOST_ADAPTER_OTHER;
+  }
+  Packet->TargetStatus      = EFI_EXT_SCSI_STATUS_TARGET_TASK_ABORTED;
+  Packet->SenseDataLength   = 0;
+  return EFI_DEVICE_ERROR;
 }
 
 STATIC
@@ -453,6 +734,7 @@ MptScsiControllerStart (
 {
   EFI_STATUS           Status;
   MPT_SCSI_DEV         *Dev;
+  UINTN                BytesMapped;
 
   Dev = AllocateZeroPool (sizeof (*Dev));
   if (Dev == NULL) {
@@ -497,9 +779,42 @@ MptScsiControllerStart (
     goto CloseProtocol;
   }
 
+  //
+  // Create buffers for data transfer
+  //
+  Status = Dev->PciIo->AllocateBuffer (
+                         Dev->PciIo,
+                         AllocateAnyPages,
+                         EfiBootServicesData,
+                         EFI_SIZE_TO_PAGES (sizeof (*Dev->Dma)),
+                         (VOID **)&Dev->Dma,
+                         EFI_PCI_ATTRIBUTE_MEMORY_CACHED
+                         );
+  if (EFI_ERROR (Status)) {
+    goto RestoreAttributes;
+  }
+
+  BytesMapped = sizeof (*Dev->Dma);
+  Status = Dev->PciIo->Map (
+                         Dev->PciIo,
+                         EfiPciIoOperationBusMasterCommonBuffer,
+                         Dev->Dma,
+                         &BytesMapped,
+                         &Dev->DmaPhysical,
+                         &Dev->DmaMapping
+                         );
+  if (EFI_ERROR (Status)) {
+    goto FreeBuffer;
+  }
+
+  if (BytesMapped != sizeof (*Dev->Dma)) {
+    Status = EFI_OUT_OF_RESOURCES;
+    goto Unmap;
+  }
+
   Status = MptScsiInit (Dev);
   if (EFI_ERROR (Status)) {
-    goto CloseProtocol;
+    goto Unmap;
   }
 
   //
@@ -526,11 +841,23 @@ MptScsiControllerStart (
                   &Dev->PassThru
                   );
   if (EFI_ERROR (Status)) {
-    goto RestoreAttributes;
+    goto Unmap;
   }
 
   return EFI_SUCCESS;
 
+Unmap:
+    Dev->PciIo->Unmap (
+                  Dev->PciIo,
+                  Dev->DmaMapping
+                  );
+
+FreeBuffer:
+    Dev->PciIo->FreeBuffer (
+                    Dev->PciIo,
+                    EFI_SIZE_TO_PAGES (sizeof (*Dev->Dma)),
+                    Dev->Dma
+      );
 RestoreAttributes:
   Dev->PciIo->Attributes (
                 Dev->PciIo,
@@ -589,6 +916,17 @@ MptScsiControllerStop (
   ASSERT_EFI_ERROR (Status);
 
   MptScsiReset (Dev);
+
+  Dev->PciIo->Unmap (
+                Dev->PciIo,
+                Dev->DmaMapping
+                );
+
+  Dev->PciIo->FreeBuffer (
+                Dev->PciIo,
+                EFI_SIZE_TO_PAGES (sizeof (*Dev->Dma)),
+                Dev->Dma
+                );
 
   Dev->PciIo->Attributes (
                 Dev->PciIo,
