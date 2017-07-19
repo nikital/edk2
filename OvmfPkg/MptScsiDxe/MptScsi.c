@@ -156,7 +156,18 @@ MptScsiGetTargetLun (
   OUT UINT64                                       *Lun
   )
 {
-  return EFI_UNSUPPORTED;
+  SCSI_DEVICE_PATH *ScsiDevicePath;
+
+  if (DevicePath->Type    != MESSAGING_DEVICE_PATH ||
+      DevicePath->SubType != MSG_SCSI_DP) {
+    return EFI_UNSUPPORTED;
+  }
+
+  ScsiDevicePath = (SCSI_DEVICE_PATH *)DevicePath;
+  **Target = ScsiDevicePath->Pun;
+  *Lun = ScsiDevicePath->Lun;
+
+  return EFI_SUCCESS;
 }
 
 STATIC
