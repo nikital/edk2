@@ -169,7 +169,33 @@ MptScsiGetTargetLun (
   OUT UINT64                                       *Lun
   )
 {
-  return EFI_UNSUPPORTED;
+  SCSI_DEVICE_PATH *ScsiDevicePath;
+
+  if (DevicePath == NULL ||
+      Target == NULL || *Target == NULL || Lun == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (DevicePath->Type    != MESSAGING_DEVICE_PATH ||
+      DevicePath->SubType != MSG_SCSI_DP) {
+    return EFI_UNSUPPORTED;
+  }
+
+  ScsiDevicePath = (SCSI_DEVICE_PATH *)DevicePath;
+  if (ScsiDevicePath->Pun > 0 ||
+      ScsiDevicePath->Lun > 0) {
+    return EFI_NOT_FOUND;
+  }
+
+  ZeroMem (*Target, TARGET_MAX_BYTES);
+  //
+  // This device support 256 targets only, so it's enough to set the LSB
+  // of Target.
+  //
+  **Target = (UINT8)ScsiDevicePath->Pun;
+  *Lun = ScsiDevicePath->Lun;
+
+  return EFI_SUCCESS;
 }
 
 STATIC
