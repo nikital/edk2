@@ -51,6 +51,7 @@ typedef struct {
   EFI_PCI_IO_PROTOCOL             *PciIo;
   UINT64                          OriginalPciAttributes;
   UINT32                          StallPerPollUsec;
+  UINT8                           MaxTarget;
   MPT_SCSI_DMA_BUFFER             *Dma;
   EFI_PHYSICAL_ADDRESS            DmaPhysical;
   VOID                            *DmaMapping;
@@ -163,6 +164,7 @@ MptScsiInit (
   UINT32                         Reply32;
 
   Dev->StallPerPollUsec = PcdGet32 (PcdMptScsiStallPerPollUsec);
+  Dev->MaxTarget = PcdGet8 (PcdMptScsiMaxTargetLimit);
 
   Status = MptScsiReset (Dev);
   if (EFI_ERROR (Status)) {
@@ -173,7 +175,7 @@ MptScsiInit (
   ZeroMem (&Reply, sizeof (Reply));
   Req.Data.WhoInit = MPT_IOC_WHOINIT_ROM_BIOS;
   Req.Data.Function = MPT_MESSAGE_HDR_FUNCTION_IOC_INIT;
-  Req.Data.MaxDevices = 1;
+  Req.Data.MaxDevices = Dev->MaxTarget + 1;
   Req.Data.MaxBuses = 1;
   Req.Data.ReplyFrameSize = sizeof (MPT_SCSI_IO_ERROR_REPLY);
 
@@ -252,7 +254,7 @@ MptScsiPopulateRequest (
     return EFI_UNSUPPORTED;
   }
 
-  if (Target > 0 || Lun > 0) {
+  if (Target > Dev->MaxTarget || Lun > 0) {
     return EFI_INVALID_PARAMETER;
   }
 
@@ -532,16 +534,27 @@ MptScsiGetNextTargetLun (
   IN OUT UINT64                                     *Lun
   )
 {
+  MPT_SCSI_DEV *Dev;
+
+  Dev = MPT_SCSI_FROM_PASS_THRU (This);
   //
-  // Currently support only target 0 LUN 0, so hardcode it
+  // Currently support only LUN 0, so hardcode it
   //
   if (!IsTargetInitialized (*Target)) {
     ZeroMem (*Target, TARGET_MAX_BYTES);
     *Lun = 0;
-    return EFI_SUCCESS;
+  } else if (**Target < Dev->MaxTarget) {
+    //
+    // This device support 256 targets only, so it's enough to increment
+    // the LSB of Target, as it will never overflow.
+    //
+    **Target += 1;
+    *Lun = 0;
   } else {
     return EFI_NOT_FOUND;
   }
+
+  return EFI_SUCCESS;
 }
 
 STATIC
@@ -552,15 +565,22 @@ MptScsiGetNextTarget (
   IN OUT UINT8                                     **Target
   )
 {
-  //
-  // Currently support only target 0 LUN 0, so hardcode it
-  //
+  MPT_SCSI_DEV *Dev;
+
+  Dev = MPT_SCSI_FROM_PASS_THRU (This);
   if (!IsTargetInitialized (*Target)) {
     ZeroMem (*Target, TARGET_MAX_BYTES);
-    return EFI_SUCCESS;
+  } else if (**Target < Dev->MaxTarget) {
+    //
+    // This device support 256 targets only, so it's enough to increment
+    // the LSB of Target, as it will never overflow.
+    //
+    **Target += 1;
   } else {
     return EFI_NOT_FOUND;
   }
+
+  return EFI_SUCCESS;
 }
 
 STATIC
@@ -573,6 +593,7 @@ MptScsiBuildDevicePath (
   IN OUT EFI_DEVICE_PATH_PROTOCOL                  **DevicePath
   )
 {
+  MPT_SCSI_DEV     *Dev;
   SCSI_DEVICE_PATH *ScsiDevicePath;
 
   if (DevicePath == NULL) {
@@ -583,7 +604,8 @@ MptScsiBuildDevicePath (
   // This device support 256 targets only, so it's enough to dereference
   // the LSB of Target.
   //
-  if (*Target > 0 || Lun > 0) {
+  Dev = MPT_SCSI_FROM_PASS_THRU (This);
+  if (*Target > Dev->MaxTarget || Lun > 0) {
     return EFI_NOT_FOUND;
   }
 
@@ -613,6 +635,7 @@ MptScsiGetTargetLun (
   OUT UINT64                                       *Lun
   )
 {
+  MPT_SCSI_DEV     *Dev;
   SCSI_DEVICE_PATH *ScsiDevicePath;
 
   if (DevicePath == NULL ||
@@ -625,8 +648,9 @@ MptScsiGetTargetLun (
     return EFI_UNSUPPORTED;
   }
 
+  Dev = MPT_SCSI_FROM_PASS_THRU (This);
   ScsiDevicePath = (SCSI_DEVICE_PATH *)DevicePath;
-  if (ScsiDevicePath->Pun > 0 ||
+  if (ScsiDevicePath->Pun > Dev->MaxTarget ||
       ScsiDevicePath->Lun > 0) {
     return EFI_NOT_FOUND;
   }
