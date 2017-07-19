@@ -44,6 +44,15 @@
 
 #define MPT_IOC_WHOINIT_ROM_BIOS 0x02
 
+#define MPT_SCSIIO_REQUEST_CONTROL_TXDIR_NONE  (0x00 << 24)
+#define MPT_SCSIIO_REQUEST_CONTROL_TXDIR_WRITE (0x01 << 24)
+#define MPT_SCSIIO_REQUEST_CONTROL_TXDIR_READ  (0x02 << 24)
+
+#define MPT_SCSI_IOCSTATUS_SUCCESS          0x0000
+#define MPT_SCSI_IOCSTATUS_DEVICE_NOT_THERE 0x0043
+#define MPT_SCSI_IOCSTATUS_DATA_OVERRUN     0x0044
+#define MPT_SCSI_IOCSTATUS_DATA_UNDERRUN    0x0045
+
 //
 // Device structures
 //
@@ -141,6 +150,14 @@ typedef union {
   } Data;
 #pragma pack ()
   UINT64 Uint64; // 8 byte alignment required by HW
-} MPT_SCSI_IO_ERROR_REPLY;
+} MPT_SCSI_IO_REPLY;
+
+typedef union {
+  struct {
+    MPT_SCSI_IO_REQUEST Header;
+    MPT_SG_ENTRY_SIMPLE Sg;
+  } Data;
+  UINT64 Uint64; // 8 byte alignment required by HW
+} MPT_SCSI_REQUEST_WITH_SG;
 
 #endif // __FUSION_MPT_SCSI_H__
