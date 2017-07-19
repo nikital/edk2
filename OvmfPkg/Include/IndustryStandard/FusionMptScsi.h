@@ -47,6 +47,11 @@
 
 #define MPT_IOC_WHOINIT_ROM_BIOS 0x02
 
+#define MPT_SCSIIO_REQUEST_CONTROL_TXDIR_WRITE (0x01 << 24)
+#define MPT_SCSIIO_REQUEST_CONTROL_TXDIR_READ  (0x02 << 24)
+
+#define MPT_SCSI_IO_ERROR_IOCSTATUS_DEVICE_NOT_THERE 0x0043
+
 //
 // Device structures
 //
@@ -106,6 +111,10 @@ typedef struct {
   UINT32    Length:             24;
   UINT32    EndOfList:          1;
   UINT32    Is64BitAddress:     1;
+  //
+  // True when the buffer contains data to be transfered. Otherwise it's the
+  // destination buffer
+  //
   UINT32    BufferContainsData: 1;
   UINT32    LocalAddress:       1;
   UINT32    ElementType:        2;
@@ -137,3 +146,11 @@ typedef struct {
 #pragma pack ()
   UINT64 Uint64; // 8 byte alignment required by HW
 } MPT_SCSI_IO_ERROR_REPLY;
+
+typedef union {
+  struct {
+    MPT_SCSI_IO_REQUEST Header;
+    MPT_SG_ENTRY_SIMPLE Sg;
+  } Data;
+  UINT64 Uint64; // 8 byte alignment required by HW
+} MPT_SCSI_REQUEST_WITH_SG;
