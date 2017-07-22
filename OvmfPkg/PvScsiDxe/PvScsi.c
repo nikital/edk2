@@ -1225,6 +1225,31 @@ PvScsiUninit (
   PvScsiRestorePciAttributes (Dev);
 }
 
+/**
+  Event notification called by ExitBootServices()
+**/
+STATIC
+VOID
+EFIAPI
+PvScsiExitBoot (
+  IN  EFI_EVENT Event,
+  IN  VOID      *Context
+  )
+{
+  PVSCSI_DEV *Dev;
+
+  Dev = Context;
+  DEBUG ((DEBUG_VERBOSE, "%a: Context=0x%p\n", __FUNCTION__, Context));
+
+  //
+  // Reset the device. This causes the device to forget about the
+  // request/completion rings. We allocated said rings in EfiBootServicesData
+  // type memory, and code executing after ExitBootServices() is permitted to
+  // overwrite it.
+  //
+  PvScsiWriteCmdDesc (Dev, PvScsiCmdAdapterReset, NULL, 0);
+}
+
 //
 // Driver Binding
 //
@@ -1318,6 +1343,17 @@ PvScsiDriverBindingStart (
     goto ClosePciIo;
   }
 
+  Status = gBS->CreateEvent (
+                  EVT_SIGNAL_EXIT_BOOT_SERVICES,
+                  TPL_CALLBACK,
+                  &PvScsiExitBoot,
+                  Dev,
+                  &Dev->ExitBoot
+                  );
+  if (EFI_ERROR (Status)) {
+    goto UninitDev;
+  }
+
   //
   // Setup complete, attempt to export the driver instance's PassThru interface
   //
@@ -1329,10 +1365,13 @@ PvScsiDriverBindingStart (
                   &Dev->PassThru
                   );
   if (EFI_ERROR (Status)) {
-    goto UninitDev;
+    goto CloseExitBoot;
   }
 
   return EFI_SUCCESS;
+
+CloseExitBoot:
+  gBS->CloseEvent (Dev->ExitBoot);
 
 UninitDev:
   PvScsiUninit (Dev);
@@ -1387,6 +1426,8 @@ PvScsiDriverBindingStop (
   if (EFI_ERROR (Status)) {
     return Status;
   }
+
+  gBS->CloseEvent (Dev->ExitBoot);
 
   PvScsiUninit (Dev);
 
