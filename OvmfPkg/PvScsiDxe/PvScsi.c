@@ -711,6 +711,20 @@ PvScsiInit (
   }
 
   //
+  // Allocate DMA communication buffer
+  //
+  Status = PvScsiAllocateSharedPages (
+             Dev,
+             EFI_SIZE_TO_PAGES (sizeof (*Dev->DmaBuf)),
+             EfiPciIoOperationBusMasterCommonBuffer,
+             (VOID **)&Dev->DmaBuf,
+             &Dev->DmaBufDmaDesc
+             );
+  if (EFI_ERROR (Status)) {
+    goto FreeRings;
+  }
+
+  //
   // Populate the exported interface's attributes
   //
   Dev->PassThru.Mode             = &Dev->PassThruMode;
@@ -741,6 +755,9 @@ PvScsiInit (
 
   return EFI_SUCCESS;
 
+FreeRings:
+  PvScsiFreeRings (Dev);
+
 RestorePciAttributes:
   PvScsiRestorePciAttributes (Dev);
 
@@ -753,6 +770,16 @@ PvScsiUninit (
   IN OUT PVSCSI_DEV *Dev
   )
 {
+  //
+  // Free DMA communication buffer
+  //
+  PvScsiFreeSharedPages (
+    Dev,
+    EFI_SIZE_TO_PAGES (sizeof (*Dev->DmaBuf)),
+    (VOID **)&Dev->DmaBuf,
+    &Dev->DmaBufDmaDesc
+    );
+
   PvScsiFreeRings (Dev);
 
   PvScsiRestorePciAttributes (Dev);
