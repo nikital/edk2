@@ -37,5 +37,6 @@
   gEfiExtScsiPassThruProtocolGuid   ## BY_START
 
 [Pcd]
-  gUefiOvmfPkgTokenSpaceGuid.PcdPvScsiMaxTargetLimit    ## CONSUMES
-  gUefiOvmfPkgTokenSpaceGuid.PcdPvScsiMaxLunLimit       ## CONSUMES
+  gUefiOvmfPkgTokenSpaceGuid.PcdPvScsiMaxTargetLimit            ## CONSUMES
+  gUefiOvmfPkgTokenSpaceGuid.PcdPvScsiMaxLunLimit               ## CONSUMES
+  gUefiOvmfPkgTokenSpaceGuid.PcdPvScsiWaitForCmpStallInUsecs    ## CONSUMES
