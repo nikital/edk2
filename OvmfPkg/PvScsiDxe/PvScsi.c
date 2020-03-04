@@ -16,6 +16,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
 #include <Protocol/PciIo.h>
+#include <Protocol/PciRootBridgeIo.h>
 
 #include "PvScsi.h"
 
@@ -398,6 +399,209 @@ PvScsiSetPCIAttributes (
 
 STATIC
 EFI_STATUS
+PvScsiAllocatePages (
+  IN PVSCSI_DEV     *Dev,
+  IN UINTN          Pages,
+  IN OUT VOID       **HostAddress
+  )
+{
+  return Dev->PciIo->AllocateBuffer (
+                       Dev->PciIo,
+                       AllocateAnyPages,
+                       EfiBootServicesData,
+                       Pages,
+                       HostAddress,
+                       EFI_PCI_ATTRIBUTE_MEMORY_CACHED
+                       );
+}
+
+STATIC
+VOID
+PvScsiFreePages (
+  IN PVSCSI_DEV     *Dev,
+  IN UINTN          Pages,
+  IN VOID           *HostAddress
+  )
+{
+  Dev->PciIo->FreeBuffer (
+                Dev->PciIo,
+                Pages,
+                HostAddress
+                );
+}
+
+STATIC
+EFI_STATUS
+PvScsiMapBuffer (
+  IN PVSCSI_DEV                     *Dev,
+  IN EFI_PCI_IO_PROTOCOL_OPERATION  PciIoOperation,
+  IN VOID                           *HostAddress,
+  IN UINTN                          NumberOfBytes,
+  OUT PVSCSI_DMA_DESC               *DmaDesc
+  )
+{
+  EFI_STATUS Status;
+  UINTN      BytesMapped;
+
+  BytesMapped = NumberOfBytes;
+  Status = Dev->PciIo->Map (
+                         Dev->PciIo,
+                         PciIoOperation,
+                         HostAddress,
+                         &BytesMapped,
+                         &DmaDesc->DeviceAddress,
+                         &DmaDesc->Mapping
+                         );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (BytesMapped != NumberOfBytes) {
+    Status = EFI_OUT_OF_RESOURCES;
+    goto Unmap;
+  }
+
+  return EFI_SUCCESS;
+
+Unmap:
+  Dev->PciIo->Unmap (Dev->PciIo, DmaDesc->Mapping);
+  DmaDesc->Mapping = NULL;
+
+  return Status;
+}
+
+STATIC
+VOID
+PvScsiUnmapBuffer (
+  IN PVSCSI_DEV                 *Dev,
+  IN OUT PVSCSI_DMA_DESC        *DmaDesc)
+{
+  Dev->PciIo->Unmap (Dev->PciIo, DmaDesc->Mapping);
+}
+
+STATIC
+EFI_STATUS
+PvScsiAllocateSharedPages (
+  IN PVSCSI_DEV                     *Dev,
+  IN UINTN                          Pages,
+  IN EFI_PCI_IO_PROTOCOL_OPERATION  PciIoOperation,
+  OUT VOID                          **HostAddress,
+  OUT PVSCSI_DMA_DESC               *DmaDesc
+  )
+{
+  EFI_STATUS Status;
+
+  *HostAddress = NULL;
+  DmaDesc->Mapping = NULL;
+
+  Status = PvScsiAllocatePages (Dev, Pages, HostAddress);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = PvScsiMapBuffer (
+             Dev,
+             PciIoOperation,
+             *HostAddress,
+             Pages * EFI_PAGE_SIZE,
+             DmaDesc
+             );
+  if (EFI_ERROR (Status)) {
+    goto FreePages;
+  }
+
+  return EFI_SUCCESS;
+
+FreePages:
+  PvScsiFreePages (Dev, Pages, *HostAddress);
+  *HostAddress = NULL;
+
+  return Status;
+}
+
+STATIC
+VOID
+PvScsiFreeSharedPages (
+  IN PVSCSI_DEV                     *Dev,
+  IN UINTN                          Pages,
+  IN OUT VOID                       **HostAddress,
+  IN OUT PVSCSI_DMA_DESC            *DmaDesc
+  )
+{
+  if (*HostAddress) {
+      if (DmaDesc->Mapping) {
+        PvScsiUnmapBuffer (Dev, DmaDesc);
+        DmaDesc->Mapping = NULL;
+      }
+
+      PvScsiFreePages (Dev, Pages, *HostAddress);
+      *HostAddress = NULL;
+  }
+}
+
+STATIC
+EFI_STATUS
+PvScsiInitRings (
+  IN OUT PVSCSI_DEV *Dev
+  )
+{
+  EFI_STATUS                  Status;
+  PVSCSI_CMD_DESC_SETUP_RINGS Cmd;
+
+  Status = PvScsiAllocateSharedPages (
+             Dev,
+             1,
+             EfiPciIoOperationBusMasterCommonBuffer,
+             (VOID **)&Dev->RingDesc.RingState,
+             &Dev->RingDesc.RingStateDmaDesc
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  ZeroMem (Dev->RingDesc.RingState, EFI_PAGE_SIZE);
+
+  Status = PvScsiAllocateSharedPages (
+             Dev,
+             1,
+             EfiPciIoOperationBusMasterCommonBuffer,
+             (VOID **)&Dev->RingDesc.RingReqs,
+             &Dev->RingDesc.RingReqsDmaDesc
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  ZeroMem (Dev->RingDesc.RingReqs, EFI_PAGE_SIZE);
+
+  Status = PvScsiAllocateSharedPages (
+             Dev,
+             1,
+             EfiPciIoOperationBusMasterCommonBuffer,
+             (VOID **)&Dev->RingDesc.RingCmps,
+             &Dev->RingDesc.RingCmpsDmaDesc
+             );
+  if (EFI_ERROR (Status)) {
+      return Status;
+  }
+  ZeroMem (Dev->RingDesc.RingCmps, EFI_PAGE_SIZE);
+
+  ZeroMem (&Cmd, sizeof Cmd);
+  Cmd.ReqRingNumPages = 1;
+  Cmd.CmpRingNumPages = 1;
+  Cmd.RingsStatePPN =
+        ((UINT64) Dev->RingDesc.RingStateDmaDesc.DeviceAddress) >>
+        EFI_PAGE_SHIFT;
+  Cmd.ReqRingPPNs[0] =
+        ((UINT64) Dev->RingDesc.RingReqsDmaDesc.DeviceAddress) >>
+        EFI_PAGE_SHIFT;
+  Cmd.CmpRingPPNs[0] =
+        ((UINT64) Dev->RingDesc.RingCmpsDmaDesc.DeviceAddress) >>
+        EFI_PAGE_SHIFT;
+
+  return PvScsiWriteCmdDesc(Dev, PVSCSI_CMD_SETUP_RINGS, &Cmd, sizeof Cmd);
+}
+
+STATIC
+EFI_STATUS
 PvScsiInit (
   IN OUT PVSCSI_DEV *Dev
   )
@@ -425,6 +629,15 @@ PvScsiInit (
   if (EFI_ERROR (Status)) {
     return Status;
   }
+
+  //
+  // Init PVSCSI rings
+  //
+  Status = PvScsiInitRings (Dev);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
   //
   // Populate the exported interface's attributes
   //
@@ -463,6 +676,28 @@ PvScsiUninit (
   IN OUT PVSCSI_DEV *Dev
   )
 {
+  //
+  // Free PVSCSI rings
+  //
+  PvScsiFreeSharedPages (
+    Dev,
+    1,
+    (VOID **)&Dev->RingDesc.RingCmps,
+    &Dev->RingDesc.RingCmpsDmaDesc
+    );
+  PvScsiFreeSharedPages (
+    Dev,
+    1,
+    (VOID **)&Dev->RingDesc.RingReqs,
+    &Dev->RingDesc.RingReqsDmaDesc
+    );
+  PvScsiFreeSharedPages (
+    Dev,
+    1,
+    (VOID **)&Dev->RingDesc.RingState,
+    &Dev->RingDesc.RingStateDmaDesc
+    );
+
   //
   // Restore PCI Attributes
   //
