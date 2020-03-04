@@ -29,6 +29,76 @@
 // Ext SCSI Pass Thru utilities
 //
 
+
+//
+// Writes a 32-bit value into BAR0 using MMIO
+//
+STATIC
+EFI_STATUS
+PvScsiMmioWrite32 (
+  IN CONST PVSCSI_DEV   *Dev,
+  IN UINT64             Offset,
+  IN UINT32             Value
+  )
+{
+  return Dev->PciIo->Mem.Write(
+                           Dev->PciIo,
+                           EfiPciIoWidthUint32,
+                           0,   // BarIndex
+                           Offset,
+                           1,   // Count
+                           &Value
+                           );
+}
+
+//
+// Send PVSCSI command to device
+//
+STATIC
+EFI_STATUS
+PvScsiWriteCmdDesc (
+  IN CONST PVSCSI_DEV   *Dev,
+  IN UINT32             Cmd,
+  IN VOID               *Desc,
+  IN UINTN              Length
+  )
+{
+  EFI_STATUS Status;
+  UINTN      LengthInWords;
+  UINT8      *WordPtr;
+  UINT8      *DescEndPtr;
+  UINT32     Word;
+
+  LengthInWords = Length / sizeof (UINT32);
+
+  if (LengthInWords > PVSCSI_MAX_CMD_DATA_WORDS) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Status = PvScsiMmioWrite32 (Dev, PVSCSI_REG_OFFSET_COMMAND, Cmd);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  WordPtr = Desc;
+  DescEndPtr = WordPtr + Length;
+
+  while (WordPtr != DescEndPtr) {
+    //
+    // CopyMem() is used to avoid strict-aliasing issues
+    //
+    CopyMem (&Word, WordPtr, sizeof (UINT32));
+
+    Status = PvScsiMmioWrite32 (Dev, PVSCSI_REG_OFFSET_COMMAND_DATA, Word);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    WordPtr += sizeof (UINT32);
+  }
+
+  return EFI_SUCCESS;
+}
 //
 // Check if Target argument to EXT_SCSI_PASS_THRU.GetNextTarget() and
 // EXT_SCSI_PASS_THRU.GetNextTargetLun() is initialized
@@ -348,6 +418,13 @@ PvScsiInit (
     return Status;
   }
 
+  //
+  // Reset adapter
+  //
+  Status = PvScsiWriteCmdDesc (Dev, PVSCSI_CMD_ADAPTER_RESET, NULL, 0);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
   //
   // Populate the exported interface's attributes
   //
