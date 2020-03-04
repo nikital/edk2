@@ -31,6 +31,84 @@
 //
 
 /**
+  Writes a 32-bit value into BAR0 using MMIO
+**/
+STATIC
+EFI_STATUS
+PvScsiMmioWrite32 (
+  IN CONST PVSCSI_DEV   *Dev,
+  IN UINT64             Offset,
+  IN UINT32             Value
+  )
+{
+  return Dev->PciIo->Mem.Write (
+                           Dev->PciIo,
+                           EfiPciIoWidthUint32,
+                           PCI_BAR_IDX0,
+                           Offset,
+                           1,   // Count
+                           &Value
+                           );
+}
+
+/**
+  Writes multiple words of data into BAR0 using MMIO
+**/
+STATIC
+EFI_STATUS
+PvScsiMmioWrite32Multiple (
+  IN CONST PVSCSI_DEV   *Dev,
+  IN UINT64             Offset,
+  IN UINTN              Count,
+  IN UINT32             *Words
+  )
+{
+  return Dev->PciIo->Mem.Write (
+                           Dev->PciIo,
+                           EfiPciIoWidthFifoUint32,
+                           PCI_BAR_IDX0,
+                           Offset,
+                           Count,
+                           Words
+                           );
+}
+
+/**
+  Send PVSCSI command to device
+**/
+STATIC
+EFI_STATUS
+PvScsiWriteCmdDesc (
+  IN CONST PVSCSI_DEV   *Dev,
+  IN UINT32             Cmd,
+  IN UINT32             *DescWords,
+  IN UINTN              DescWordsCount
+  )
+{
+  EFI_STATUS Status;
+
+  if (DescWordsCount > PVSCSI_MAX_CMD_DATA_WORDS) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Status = PvScsiMmioWrite32 (Dev, PvScsiRegOffsetCommand, Cmd);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if (DescWordsCount > 0) {
+    return PvScsiMmioWrite32Multiple (
+             Dev,
+             PvScsiRegOffsetCommandData,
+             DescWordsCount,
+             DescWords
+             );
+  }
+
+  return EFI_SUCCESS;
+}
+
+/**
   Check if Target argument to EXT_SCSI_PASS_THRU.GetNextTarget() and
   EXT_SCSI_PASS_THRU.GetNextTargetLun() is initialized
 **/
@@ -358,6 +436,14 @@ PvScsiInit (
   }
 
   //
+  // Reset adapter
+  //
+  Status = PvScsiWriteCmdDesc (Dev, PvScsiCmdAdapterReset, NULL, 0);
+  if (EFI_ERROR (Status)) {
+    goto RestorePciAttributes;
+  }
+
+  //
   // Populate the exported interface's attributes
   //
   Dev->PassThru.Mode             = &Dev->PassThruMode;
@@ -387,6 +473,11 @@ PvScsiInit (
   Dev->PassThruMode.IoAlign = 0;
 
   return EFI_SUCCESS;
+
+RestorePciAttributes:
+  PvScsiRestorePciAttributes (Dev);
+
+  return Status;
 }
 
 STATIC
